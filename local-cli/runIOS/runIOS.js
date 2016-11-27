@@ -14,9 +14,6 @@ const path = require('path');
 const findXcodeProject = require('./findXcodeProject');
 const parseIOSDevicesList = require('./parseIOSDevicesList');
 const findMatchingSimulator = require('./findMatchingSimulator');
-const getBuildPath = function(configuration = 'Debug', appName, isDevice) {
-  return `build/Build/Products/${configuration}-${isDevice ? 'iphoneos' : 'iphonesimulator'}/${appName}.app`;
-};
 
 function runIOS(argv, config, args) {
   process.chdir(args.projectPath);
@@ -27,6 +24,7 @@ function runIOS(argv, config, args) {
 
   const inferredSchemeName = path.basename(xcodeProject.name, path.extname(xcodeProject.name));
   const scheme = args.scheme || inferredSchemeName;
+  const configuration = args.configuration || 'Debug';
   console.log(`Found Xcode ${xcodeProject.isWorkspace ? 'workspace' : 'project'} ${xcodeProject.name}`);
   const devices = parseIOSDevicesList(
     child_process.execFileSync('xcrun', ['instruments', '-s'], {encoding: 'utf8'})
@@ -34,7 +32,7 @@ function runIOS(argv, config, args) {
   if (args.device) {
     const selectedDevice = matchingDevice(devices, args.device);
     if (selectedDevice){
-      return runOnDevice(selectedDevice, scheme, xcodeProject, args.configuration);
+      return runOnDevice(selectedDevice, scheme, xcodeProject);
     } else {
       if (devices){
         console.log('Could not find device with the name: "' + args.device + '".');
@@ -45,19 +43,19 @@ function runIOS(argv, config, args) {
       }
     }
   } else if (args.udid) {
-    return runOnDeviceByUdid(args, scheme, xcodeProject, devices);
+    return runOnDeviceByUdid(args.udid, scheme, configuration, xcodeProject, devices);
   } else {
-    return runOnSimulator(xcodeProject, args, inferredSchemeName, scheme);
+    return runOnSimulator(xcodeProject, args, inferredSchemeName, scheme, configuration);
   }
 }
 
-function runOnDeviceByUdid(args, scheme, xcodeProject, devices) {
-  const selectedDevice = matchingDeviceByUdid(devices, args.udid);
+function runOnDeviceByUdid(udid, scheme, configuration, xcodeProject, devices) {
+  const selectedDevice = matchingDeviceByUdid(devices, udid);
   if (selectedDevice){
-    return runOnDevice(selectedDevice, scheme, xcodeProject, args.configuration);
+    return runOnDevice(selectedDevice, scheme, configuration, xcodeProject);
   } else {
     if (devices){
-      console.log('Could not find device with the udid: "' + args.udid + '".');
+      console.log('Could not find device with the udid: "' + udid + '".');
       console.log('Choose one of the following:');
       printFoundDevices(devices);
     } else {
@@ -66,7 +64,7 @@ function runOnDeviceByUdid(args, scheme, xcodeProject, devices) {
   }
 }
 
-function runOnSimulator(xcodeProject, args, inferredSchemeName, scheme){
+function runOnSimulator(xcodeProject, args, inferredSchemeName, scheme, configuration){
   return new Promise((resolve) => {
     try {
       var simulators = JSON.parse(
@@ -78,7 +76,7 @@ function runOnSimulator(xcodeProject, args, inferredSchemeName, scheme){
 
     const selectedSimulator = findMatchingSimulator(simulators, args.simulator);
     if (!selectedSimulator) {
-      throw new Error(`Could not find ${args.simulator} simulator`);
+      throw new Error(`Cound't find ${args.simulator} simulator`);
     }
 
     const simulatorFullName = formattedDeviceName(selectedSimulator);
@@ -91,12 +89,12 @@ function runOnSimulator(xcodeProject, args, inferredSchemeName, scheme){
     }
     resolve(selectedSimulator.udid)
   })
-  .then((udid) => buildProject(xcodeProject, udid, scheme, args.configuration))
+  .then((udid) => buildProject(xcodeProject, udid, scheme, configuration))
   .then((appName) => {
     if (!appName) {
       appName = inferredSchemeName;
     }
-    let appPath = getBuildPath(args.configuration, appName);
+    const appPath = `build/Build/Products/${configuration}-iphonesimulator/${appName}.app`;
     console.log(`Installing ${appPath}`);
     child_process.spawnSync('xcrun', ['simctl', 'install', 'booted', appPath], {stdio: 'inherit'});
 
@@ -111,14 +109,14 @@ function runOnSimulator(xcodeProject, args, inferredSchemeName, scheme){
   })
 }
 
-function runOnDevice(selectedDevice, scheme, xcodeProject, configuration){
+function runOnDevice(selectedDevice, scheme, configuration, xcodeProject){
   return buildProject(xcodeProject, selectedDevice.udid, scheme, configuration)
   .then((appName) => {
     if (!appName) {
       appName = scheme;
     }
     const iosDeployInstallArgs = [
-      '--bundle', getBuildPath(configuration, appName, true),
+      '--bundle', 'build/Build/Products/Debug-iphoneos/' + appName + '.app',
       '--id' , selectedDevice.udid,
       '--justlaunch'
     ];
@@ -135,13 +133,13 @@ function runOnDevice(selectedDevice, scheme, xcodeProject, configuration){
   });
 }
 
-function buildProject(xcodeProject, udid, scheme, configuration = 'Debug') {
+function buildProject(xcodeProject, udid, scheme, configuration) {
   return new Promise((resolve,reject) =>
   {
-     var xcodebuildArgs = [
+     const xcodebuildArgs = [
       xcodeProject.isWorkspace ? '-workspace' : '-project', xcodeProject.name,
-      '-configuration', configuration,
       '-scheme', scheme,
+      '-configuration', configuration,
       '-destination', `id=${udid}`,
       '-derivedDataPath', 'build',
     ];
@@ -166,18 +164,20 @@ function buildProject(xcodeProject, udid, scheme, configuration = 'Debug') {
   });
 }
 
+
 function matchingDevice(devices, deviceName) {
   if (deviceName === true && devices.length === 1)
   {
     console.log(`Using first available device ${devices[0].name} due to lack of name supplied.`)
     return devices[0];
-  }
+  }  
   for (let i = devices.length - 1; i >= 0; i--) {
     if (devices[i].name === deviceName || formattedDeviceName(devices[i]) === deviceName) {
       return devices[i];
     }
   }
 }
+
 
 function matchingDeviceByUdid(devices, udid) {
   for (let i = devices.length - 1; i >= 0; i--) {
@@ -219,12 +219,12 @@ module.exports = {
     command: '--simulator [string]',
     description: 'Explicitly set simulator to use',
     default: 'iPhone 6',
-  } , {
-    command: '--configuration [string]',
-    description: 'Explicitly set the scheme configuration to use',
-  } , {
+  }, {
     command: '--scheme [string]',
     description: 'Explicitly set Xcode scheme to use',
+  }, {
+    command: '--configuration [string]',
+    description: 'Explicitly set Xcode configuration to use',
   }, {
     command: '--project-path [string]',
     description: 'Path relative to project root where the Xcode project '
@@ -238,3 +238,4 @@ module.exports = {
     description: 'Explicitly set device to use by udid',
   }]
 };
+
